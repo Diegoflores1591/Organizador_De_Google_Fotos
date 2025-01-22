@@ -1,7 +1,9 @@
 import customtkinter as ctk
 from tkinter import filedialog, messagebox
-import organizador
 import webbrowser
+import os
+import logging
+import organizador
 
 # Diccionario que agrupa todos los textos de la interfaz por idioma
 LANG_DICT = {
@@ -40,6 +42,22 @@ LANG_DICT = {
 }
 
 
+class LabelLogHandler(logging.Handler):
+    """
+    Handler personalizado que muestra SOLO el último mensaje
+    en un label (status_label). Cada log nuevo sobreescribe el anterior.
+    """
+    def __init__(self, label):
+        super().__init__()
+        self.label = label
+
+    def emit(self, record):
+        msg = self.format(record)
+        # Actualizamos el label con el último mensaje
+        self.label.configure(text=msg)
+        self.label.update_idletasks()
+
+
 class OrganizadorApp:
     """
     Clase principal que crea la interfaz gráfica con CustomTkinter
@@ -49,34 +67,27 @@ class OrganizadorApp:
         self.root = root
 
         # Ajustes de ventana
-        self.root.geometry("600x400")
-        self.root.resizable(False, False)
+        self.root.geometry("700x550")
+        self.root.resizable(True, True)
         ctk.set_appearance_mode("System")
         ctk.set_default_color_theme("blue")
-        
-        
 
         # Idioma por defecto
         self.selected_language = "English"
-        # Cargamos los textos según idioma
         self.lang_texts = LANG_DICT[self.selected_language]
-
-        # Configuramos título
         self.root.title(self.lang_texts["title"])
 
         # Creamos la interfaz
         self.create_header()
         self.create_main_frame()
 
+        # Agregamos el handler de logging que actualizará el label
+        self.attach_logger_to_label()
+
     def create_header(self):
-        """
-        Crea la barra superior con el botón de ayuda y
-        el selector de idioma.
-        """
         self.header_frame = ctk.CTkFrame(self.root, fg_color="transparent")
         self.header_frame.pack(fill="x", padx=10, pady=10)
 
-        # Botón de documentación
         self.help_button = ctk.CTkButton(
             self.header_frame,
             text=self.lang_texts["help_button"],
@@ -88,7 +99,6 @@ class OrganizadorApp:
         )
         self.help_button.pack(side="left")
 
-        # Frame para selector de idioma
         self.language_frame = ctk.CTkFrame(self.header_frame, fg_color="transparent")
         self.language_frame.pack(side="right")
 
@@ -104,10 +114,6 @@ class OrganizadorApp:
         self.language_combobox.pack(side="left")
 
     def create_main_frame(self):
-        """
-        Crea el marco principal y los elementos de
-        entrada y botones necesarios.
-        """
         self.main_frame = ctk.CTkFrame(self.root, corner_radius=10)
         self.main_frame.pack(padx=20, pady=[0, 50], fill="both", expand=True)
 
@@ -191,33 +197,40 @@ class OrganizadorApp:
         )
         self.start_button.pack(pady=20)
 
-    # -------------------------
-    #  MÉTODOS DE LA APLICACIÓN
-    # -------------------------
+        # Barra de progreso
+        self.progress_bar = ctk.CTkProgressBar(
+            self.main_frame,
+            orientation="horizontal",
+            mode="determinate"
+        )
+        self.progress_bar.pack(pady=10)
+        self.progress_bar.set(0)
 
-    def select_base_folder(self):
-        """
-        Abre un diálogo para seleccionar la carpeta base de fotos.
-        """
-        folder = filedialog.askdirectory()
-        if folder:
-            self.base_folder_entry.delete(0, ctk.END)
-            self.base_folder_entry.insert(0, folder)
+        # Label para mostrar el ÚLTIMO mensaje de logging
+        self.status_label = ctk.CTkLabel(
+            self.main_frame,
+            text="",
+            fg_color="transparent",
+            wraplength=500
+        )
+        self.status_label.pack(pady=(5, 0))
 
-    def select_output_folder(self):
+    def attach_logger_to_label(self):
         """
-        Abre un diálogo para seleccionar la carpeta de destino.
+        Crea un handler que captura los logs y muestra el último mensaje en self.status_label
+        en el nivel DEBUG (para ver todos).
         """
-        folder = filedialog.askdirectory()
-        if folder:
-            self.output_folder_entry.delete(0, ctk.END)
-            self.output_folder_entry.insert(0, folder)
+        label_handler = LabelLogHandler(self.status_label)
+        label_handler.setLevel(logging.DEBUG)  # Mostrar todos los niveles en el label
+
+        formatter = logging.Formatter('%(asctime)s [%(levelname)s] %(message)s', '%d-%m-%Y %H:%M:%S')
+        label_handler.setFormatter(formatter)
+
+        logger = logging.getLogger()          # Root logger
+        logger.setLevel(logging.DEBUG)        # Nivel DEBUG global
+        logger.addHandler(label_handler)
 
     def start_organizing(self):
-        """
-        Inicia el proceso de organización llamando a la función principal
-        del módulo 'Español' (organizador) con los datos ingresados.
-        """
         api_key = self.api_key_entry.get()
         base_folder = self.base_folder_entry.get()
         output_folder = self.output_folder_entry.get()
@@ -229,12 +242,27 @@ class OrganizadorApp:
             )
             return
 
+        # Actualizamos variables globales (opcional)
         organizador.OPENCAGE_API_KEY = api_key
         organizador.BASE_FOLDER = base_folder
         organizador.OUTPUT_FOLDER = output_folder
 
+        self.total_files = self.count_files(base_folder)
+        self.processed_files = 0
+
+        if self.total_files == 0:
+            messagebox.showinfo("Info", "No hay archivos de foto o video en la carpeta origen.")
+            return
+
+        self.progress_bar.set(0)
+
         try:
-            organizador.main(api_key, base_folder, output_folder)
+            organizador.main(
+                api_key,
+                base_folder,
+                output_folder,
+                progress_callback=self.file_processed_callback
+            )
             messagebox.showinfo(
                 self.lang_texts["success_title"],
                 self.lang_texts["success_text"]
@@ -245,28 +273,43 @@ class OrganizadorApp:
                 f'{self.lang_texts["error_text"]} {e}'
             )
 
+    def file_processed_callback(self):
+        self.processed_files += 1
+        fraction = self.processed_files / self.total_files
+        self.progress_bar.set(fraction)
+        self.root.update_idletasks()
+
+    def count_files(self, folder):
+        valid_extensions = ('.jpg', '.jpeg', '.png', '.mp4', '.mov', '.mkv', '.avi')
+        total = 0
+        for root, _, files in os.walk(folder):
+            for f in files:
+                if os.path.splitext(f)[1].lower() in valid_extensions:
+                    total += 1
+        return total
+
+    def select_base_folder(self):
+        folder = filedialog.askdirectory()
+        if folder:
+            self.base_folder_entry.delete(0, ctk.END)
+            self.base_folder_entry.insert(0, folder)
+
+    def select_output_folder(self):
+        folder = filedialog.askdirectory()
+        if folder:
+            self.output_folder_entry.delete(0, ctk.END)
+            self.output_folder_entry.insert(0, folder)
+
     def open_api_link(self):
-        """
-        Abre en el navegador la página de Opencage para obtener la API Key.
-        """
-        link = "https://opencagedata.com/dashboard"
-        webbrowser.open(link)
+        webbrowser.open("https://opencagedata.com/dashboard")
 
     def open_documentation(self):
-        """
-        Abre la documentación (repositorio en GitHub) en el navegador.
-        """
-        link2 = "https://github.com/Diegoflores1591/Organizador_De_Google_Fotos"
-        webbrowser.open(link2)
+        webbrowser.open("https://github.com/Diegoflores1591/Organizador_De_Google_Fotos")
 
     def select_language(self, selected_language):
-        """
-        Actualiza los textos de la interfaz según el idioma seleccionado.
-        """
         self.selected_language = selected_language
         self.lang_texts = LANG_DICT[self.selected_language]
 
-        # Actualizamos el título y textos de la UI
         self.root.title(self.lang_texts["title"])
         self.api_key_label.configure(text=self.lang_texts["api_label"])
         self.api_key_button.configure(text=self.lang_texts["api_button_label"])
